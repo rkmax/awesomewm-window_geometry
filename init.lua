@@ -2,21 +2,64 @@ local awful = require("awful")
 local gears = require("gears")
 local naughty = require("naughty")
 
--- Define the file path to store window geometry settings
-local geometry_file = gears.filesystem.get_cache_dir() .. "window_geometry"
-local geometry_windows = gears.filesystem.get_cache_dir() .. "window_geometry_windows"
+-- Define la clase WindowGeometryManager
+local WindowGeometryManager = {}
+WindowGeometryManager.__index = WindowGeometryManager
 
-local already_loaded = false
+-- Constructor de la clase
+function WindowGeometryManager:new(initial_ignored_classes)
+    local self = setmetatable({}, WindowGeometryManager)
+    self.geometry_file = gears.filesystem.get_cache_dir() .. "window_geometry"
+    self.geometry_windows = gears.filesystem.get_cache_dir() .. "window_geometry_windows"
+    self.already_loaded = false
+    self.ignored_classes = initial_ignored_classes or {}
+    return self
+end
 
-local function geometries_to_string(geometries)
+function WindowGeometryManager:is_ignored_class(class)
+    for _, pattern in ipairs(self.ignored_classes) do
+        if string.match(class, pattern) then
+            return true
+        end
+    end
+    return false
+end
+
+function WindowGeometryManager:should_ignore_client(c)
+    if self:is_ignored_class(c.class) then
+        return true
+    end
+
+    if c.fullscreen then
+        return true
+    end
+    if c.type ~= "normal" then
+        return true
+    end
+
+    return false
+end
+
+function WindowGeometryManager:geometries_to_string(geometries)
     local result = ""
-    for class, geom in pairs(geometries) do
+
+    -- Obtener las claves de la tabla y ordenarlas
+    local classes = {}
+    for class in pairs(geometries) do
+        table.insert(classes, class)
+    end
+    table.sort(classes)
+
+    -- Construir la cadena usando las claves ordenadas
+    for _, class in ipairs(classes) do
+        local geom = geometries[class]
         result = result .. string.format("%s=%d,%d,%d,%d\n", class, geom.x, geom.y, geom.width, geom.height)
     end
+
     return result
 end
 
-local function geometries_from_string(str)
+function WindowGeometryManager:geometries_from_string(str)
     local geometries = {}
     for line in str:gmatch("[^\n]+") do
         local class, x, y, width, height = line:match("^(.-)=(.-),(.-),(.-),(.+)$")
@@ -29,58 +72,57 @@ local function geometries_from_string(str)
 end
 
 -- Load saved geometries from the file
-local function load_geometries()
+function WindowGeometryManager:load_geometries()
     local geometries = {}
-    local file = io.open(geometry_file, "r")
+    local file = io.open(self.geometry_file, "r")
     if file then
         local str = file:read("*all")
-        geometries = geometries_from_string(str)
+        geometries = self:geometries_from_string(str)
         file:close()
     end
     return geometries
 end
 
 -- Save geometries to the file
-local function save_geometries(geometries)
-    local file = io.open(geometry_file, "w")
+function WindowGeometryManager:save_geometries(geometries)
+    local file = io.open(self.geometry_file, "w")
     if not file then
         naughty.notify({ preset = naughty.config.presets.critical,
                          title = "Geometry Error",
                          text = "Failed to open geometry file for writing." })
         return
     end
-    file:write(geometries_to_string(geometries))
+    file:write(self:geometries_to_string(geometries))
     file:close()
 end
 
-local function save_all_window_geometries()
+function WindowGeometryManager:save_all_window_geometries()
     local geometries = {}
     for _, c in ipairs(client.get()) do
         local window = c.window
-        if window then
+        if window and not self:should_ignore_client(c) then
             geometries[window] = c:geometry()
         end
     end
 
-
-    -- create window geometry file
-    local file = io.open(geometry_windows, "w")
+    -- Create window geometry file
+    local file = io.open(self.geometry_windows, "w")
     if not file then
         naughty.notify({ preset = naughty.config.presets.critical,
                          title = "Geometry Error",
                          text = "Failed to open geometry file for writing." })
         return
     end
-    file:write(geometries_to_string(geometries))
+    file:write(self:geometries_to_string(geometries))
     file:close()
 end
 
-local function restore_all_window_geometries()
+function WindowGeometryManager:restore_all_window_geometries()
     local geometries = {}
-    local file = io.open(geometry_windows, "r")
+    local file = io.open(self.geometry_windows, "r")
     if file then
         local str = file:read("*all")
-        geometries = geometries_from_string(str)
+        geometries = self:geometries_from_string(str)
         file:close()
     end
 
@@ -92,63 +134,63 @@ local function restore_all_window_geometries()
     end
 
     if file then
-        os.remove(geometry_windows)
+        os.remove(self.geometry_windows)
     end
-    already_loaded = true
+    self.already_loaded = true
 end
 
 -- Save the geometry of a client window
-local function save_client_geometry(c)
-    local geometries = load_geometries()
+function WindowGeometryManager:save_client_geometry(c)
+    local geometries = self:load_geometries()
     local class = c.class
-    if class then
+    if class and not self:should_ignore_client(c) then
         geometries[class] = c:geometry()
-        save_geometries(geometries)
+        self:save_geometries(geometries)
     end
 end
 
 -- Restore the saved geometry for a client window
-local function restore_client_geometry(c)
-    if not already_loaded then
+function WindowGeometryManager:restore_client_geometry(c)
+    if not self.already_loaded then
         return
     end
-    local geometries = load_geometries()
+    local geometries = self:load_geometries()
     local class = c.class
     local window = c.window_geometry
 
-    if class and geometries[class] then
+    if class and geometries[class] and not self:should_ignore_client(c) then
         c:geometry(geometries[class])
     end
 end
 
--- Connect the signals to save and restore the geometry of a client window
+-- Static init function to create and initialize the manager
+local function init(initial_ignored_classes)
+    local manager = WindowGeometryManager:new(initial_ignored_classes)
 
-client.connect_signal("manage", function(c)
-	gears.timer.delayed_call(function()
-        restore_client_geometry(c)
+    -- Connect the signals to save and restore the geometry of a client window
+    client.connect_signal("manage", function(c)
+        gears.timer.delayed_call(function()
+            manager:restore_client_geometry(c)
+        end)
     end)
-end)
 
-client.connect_signal("unmanage", function(c)
-    save_client_geometry(c)
-end)
-
-awesome.connect_signal("exit", function(restarting)
-	if restarting then
-		save_all_window_geometries()
-	end
-end)
-
-awesome.connect_signal("startup", function()
-	gears.timer.delayed_call(function()
-        restore_all_window_geometries()
+    client.connect_signal("unmanage", function(c)
+        manager:save_client_geometry(c)
     end)
-end)
 
--- Return the functions to be used externally if needed
+    awesome.connect_signal("exit", function(restarting)
+        if restarting then
+            manager:save_all_window_geometries()
+        end
+    end)
+
+    awesome.connect_signal("startup", function()
+        gears.timer.delayed_call(function()
+            manager:restore_all_window_geometries()
+        end)
+    end)
+end
+
 return {
-    save_client_geometry = save_client_geometry,
-    restore_client_geometry = restore_client_geometry,
-    save_all_window_geometries = save_all_window_geometries,
-    restore_all_window_geometries = restore_all_window_geometries
+    init = init
 }
